@@ -2,11 +2,16 @@ using UnityEngine;
 using Mirror;
 using Steamworks;
 using System.Collections;
+using System.Collections.Generic;
 
 public class SteamNetworkManager : NetworkManager
 {
     [Header("Player Prefabs")]
     public GameObject xrNetworkPlayerPrefab;
+
+    [Header("Spawn Settings")]
+    public Vector3 spawnCenter = new Vector3(336f, 0.25f, -606f);
+    public float spawnRadius = 1.5f;
 
     private Callback<LobbyEnter_t> lobbyEnterCallback;
     private Callback<LobbyCreated_t> lobbyCreatedCallback;
@@ -17,29 +22,29 @@ public class SteamNetworkManager : NetworkManager
 
     private LobbyUI lobbyUI;
     private bool gameStarted = false;
+    private bool lobbyUIDisabled = false;
+
+    private Dictionary<int, int> connectionSpawnIndex = new Dictionary<int, int>();
+    private int nextSpawnIndex = 0;
 
     public override void Awake()
     {
         base.Awake();
-        autoCreatePlayer = false; 
-        playerPrefab = null; 
+        autoCreatePlayer = false;
+        playerPrefab = null;
         DontDestroyOnLoad(gameObject);
     }
 
     private void OnEnable()
     {
-        if (SteamInitializer.Initialized)
-        {
-            HookCallbacks();
-        }
-        else
-        {
-            SteamInitializer.OnSteamInitialized += HookCallbacks;
-        }
+        if (SteamInitializer.Initialized) HookCallbacks();
+        else SteamInitializer.OnSteamInitialized += HookCallbacks;
     }
 
     private void HookCallbacks()
     {
+        if (lobbyEnterCallback != null) return;
+
         lobbyEnterCallback = Callback<LobbyEnter_t>.Create(OnLobbyEnter);
         lobbyCreatedCallback = Callback<LobbyCreated_t>.Create(OnLobbyCreated);
         gameLobbyJoinRequestedCallback = Callback<GameLobbyJoinRequested_t>.Create(OnGameLobbyJoinRequested);
@@ -50,21 +55,39 @@ public class SteamNetworkManager : NetworkManager
 
     private new void Start()
     {
+        base.Start();
         lobbyUI = FindFirstObjectByType<LobbyUI>();
+        NetworkClient.RegisterHandler<StatusUpdateMessage>(OnStatusUpdateMessage);
+
+        if (xrNetworkPlayerPrefab == null)
+        {
+            Debug.LogError("[SteamNetworkManager] xrNetworkPlayerPrefab not assigned! Please assign it in the Inspector!");
+        }
+    }
+
+    private void OnStatusUpdateMessage(StatusUpdateMessage msg)
+    {
+        Debug.Log($"[SteamNetworkManager] Received status update: {msg.status}");
+        lobbyUI?.UpdateStatus(msg.status);
+
+        if (msg.status == "Game starting...")
+        {
+            Debug.Log("[SteamNetworkManager] Client received game start signal");
+            // Don't disable UI here - let the local player spawn handle it
+        }
     }
 
     public void HostLobby()
     {
         if (!SteamInitializer.Initialized)
         {
-            Debug.LogWarning("[SteamNetworkManager] Steam not initialized! Cannot host.");
+            Debug.LogWarning("[SteamNetworkManager] Steam not initialized!");
             lobbyUI?.UpdateStatus("Error: Steam not initialized!");
             return;
         }
 
-        Debug.Log("[SteamNetworkManager] Creating Steam lobby...");
         lobbyUI?.UpdateStatus("Creating lobby...");
-        SteamAPICall_t handle = SteamMatchmaking.CreateLobby(ELobbyType.k_ELobbyTypeFriendsOnly, maxConnections);
+        SteamMatchmaking.CreateLobby(ELobbyType.k_ELobbyTypeFriendsOnly, maxConnections);
     }
 
     private void OnLobbyCreated(LobbyCreated_t callback)
@@ -72,37 +95,33 @@ public class SteamNetworkManager : NetworkManager
         if (callback.m_eResult == EResult.k_EResultOK)
         {
             currentLobbyID = new CSteamID(callback.m_ulSteamIDLobby);
-            Debug.Log($"[SteamNetworkManager] Lobby created successfully: {currentLobbyID}");
+            Debug.Log($"[SteamNetworkManager] Lobby created: {currentLobbyID}");
             lobbyUI?.UpdateStatus("Lobby created! Waiting for players...");
 
-            // Set lobby data for visibility
-            SteamMatchmaking.SetLobbyData(currentLobbyID, "name", SteamFriends.GetPersonaName() + "'s Lobby");
+            try
+            {
+                SteamMatchmaking.SetLobbyData(currentLobbyID, "name",
+                    SteamFriends.GetPersonaName() + "'s Lobby");
+            }
+            catch { }
 
-            DebugSteamStatus();
-
-            // Start Mirror host - FizzySteamworks handles the connection automatically
             StartCoroutine(StartHostDelayed());
         }
         else
         {
             Debug.LogError($"[SteamNetworkManager] Failed to create lobby: {callback.m_eResult}");
             lobbyUI?.UpdateStatus($"Failed to create lobby: {callback.m_eResult}");
-
-            if (lobbyUI != null && lobbyUI.createLobbyButton != null)
-                lobbyUI.createLobbyButton.interactable = true;
         }
     }
 
     private IEnumerator StartHostDelayed()
     {
         yield return null;
-        Debug.Log($"[SteamNetworkManager] Starting Mirror host...");
         StartHost();
     }
 
     private void OnGameLobbyJoinRequested(GameLobbyJoinRequested_t callback)
     {
-        Debug.Log($"[SteamNetworkManager] Received join request for lobby {callback.m_steamIDLobby}");
         lobbyUI?.UpdateStatus("Joining friend's lobby...");
         SteamMatchmaking.JoinLobby(callback.m_steamIDLobby);
     }
@@ -110,20 +129,11 @@ public class SteamNetworkManager : NetworkManager
     private void OnLobbyEnter(LobbyEnter_t callback)
     {
         currentLobbyID = new CSteamID(callback.m_ulSteamIDLobby);
-        Debug.Log($"[SteamNetworkManager] Entered lobby {currentLobbyID}");
 
-        DebugSteamStatus();
-
-        // If we're not the host, connect as client
         if (!NetworkServer.active)
         {
             lobbyUI?.UpdateStatus("Joined lobby! Connecting to host...");
-
-            // Get the host's Steam ID (lobby owner)
             CSteamID hostSteamID = SteamMatchmaking.GetLobbyOwner(currentLobbyID);
-            Debug.Log($"[SteamNetworkManager] Connecting to host: {hostSteamID}");
-
-            // FizzySteamworks uses the Steam ID directly
             networkAddress = hostSteamID.ToString();
             StartCoroutine(StartClientDelayed());
         }
@@ -136,88 +146,70 @@ public class SteamNetworkManager : NetworkManager
     private IEnumerator StartClientDelayed()
     {
         yield return new WaitForSeconds(0.5f);
-        Debug.Log($"[SteamNetworkManager] Starting Mirror client...");
         StartClient();
     }
 
     public override void OnClientConnect()
     {
         base.OnClientConnect();
-        Debug.Log("[SteamNetworkManager] Client connected to host!");
         lobbyUI?.UpdateStatus("Connected to host!");
+        Debug.Log("[SteamNetworkManager] Client connected successfully");
     }
 
     public override void OnServerConnect(NetworkConnectionToClient conn)
     {
         base.OnServerConnect(conn);
-        Debug.Log($"[SteamNetworkManager] Player connected: {conn}");
-        lobbyUI?.UpdateStatus($"Player joined! ({NetworkServer.connections.Count} total)");
 
-        // If game already started, spawn player immediately
+        int totalPlayers = NetworkServer.connections.Count;
+        lobbyUI?.UpdateStatus($"Player joined! ({totalPlayers} total)");
+
+        if (!connectionSpawnIndex.ContainsKey(conn.connectionId))
+        {
+            connectionSpawnIndex[conn.connectionId] = nextSpawnIndex++;
+            Debug.Log($"[SteamNetworkManager] Assigned spawn index {connectionSpawnIndex[conn.connectionId]} to connection {conn.connectionId}");
+        }
+
+        // If game already started, spawn immediately for late joiners
         if (gameStarted)
         {
+            Debug.Log($"[SteamNetworkManager] Late joiner detected, spawning immediately for connection {conn.connectionId}");
             SpawnPlayerForConnection(conn);
         }
-    }
-
-    public override void OnClientError(TransportError error, string reason)
-    {
-        base.OnClientError(error, reason);
-        Debug.LogError($"[SteamNetworkManager] Client connection error: {error} - {reason}");
-        lobbyUI?.UpdateStatus($"Connection failed: {reason}");
     }
 
     public override void OnClientDisconnect()
     {
         base.OnClientDisconnect();
-        Debug.Log("[SteamNetworkManager] Client disconnected");
-
-        if (lobbyUI != null)
-        {
-            lobbyUI.gameObject.SetActive(true);
-            lobbyUI.UpdateStatus("Disconnected from host");
-        }
+        lobbyUI?.UpdateStatus("Disconnected from host");
 
         if (currentLobbyID.IsValid())
         {
             SteamMatchmaking.LeaveLobby(currentLobbyID);
-            currentLobbyID.Clear();
+            currentLobbyID = new CSteamID();
         }
 
         gameStarted = false;
+        lobbyUIDisabled = false;
     }
 
     public override void OnStopServer()
     {
         base.OnStopServer();
-        Debug.Log("[SteamNetworkManager] Server stopped");
         lobbyUI?.UpdateStatus("Server stopped");
 
         if (currentLobbyID.IsValid())
-        {
             SteamMatchmaking.LeaveLobby(currentLobbyID);
-            currentLobbyID.Clear();
-        }
 
         gameStarted = false;
-    }
-
-    public override void OnStopClient()
-    {
-        base.OnStopClient();
-        Debug.Log("[SteamNetworkManager] Client stopped");
-
-        if (lobbyUI != null && !gameStarted)
-        {
-            lobbyUI.UpdateStatus("Disconnected from host");
-        }
+        lobbyUIDisabled = false;
+        connectionSpawnIndex.Clear();
+        nextSpawnIndex = 0;
     }
 
     public void StartGame()
     {
         if (!NetworkServer.active)
         {
-            Debug.LogWarning("[SteamNetworkManager] Only the host can start the game!");
             lobbyUI?.UpdateStatus("Error: Only host can start the game");
             return;
         }
@@ -228,75 +220,122 @@ public class SteamNetworkManager : NetworkManager
             return;
         }
 
-        Debug.Log("[SteamNetworkManager] Starting game for all players...");
         gameStarted = true;
+        int connectionCount = NetworkServer.connections.Count;
+        Debug.Log($"[SteamNetworkManager] Starting game with {connectionCount} players");
 
-        // Spawn XRNetworkPlayer for each connected player
+        // Notify all clients that game is starting
+        SendStatusToAllClients("Game starting...");
+
+        StartCoroutine(SpawnAllPlayersDelayed());
+    }
+
+    private IEnumerator SpawnAllPlayersDelayed()
+    {
+        yield return new WaitForSeconds(0.1f);
+
+        // Spawn all players
+        int spawnedCount = 0;
         foreach (NetworkConnectionToClient conn in NetworkServer.connections.Values)
         {
+            Debug.Log($"[SteamNetworkManager] Spawning player {spawnedCount + 1} for connection {conn.connectionId}");
             SpawnPlayerForConnection(conn);
+            spawnedCount++;
         }
+
+        Debug.Log($"[SteamNetworkManager] Finished spawning {spawnedCount} players");
+    }
+
+    private void SendStatusToAllClients(string status)
+    {
+        lobbyUI?.UpdateStatus(status);
+
+        if (NetworkServer.active)
+        {
+            NetworkServer.SendToAll(new StatusUpdateMessage { status = status });
+        }
+    }
+
+    public void NotifyPlayerSpawned()
+    {
+        if (lobbyUIDisabled) return;
+
+        Debug.Log("[SteamNetworkManager] Player spawned notification received");
+        DisableLobbyUI();
+    }
+
+    private void DisableLobbyUI()
+    {
+        if (lobbyUIDisabled)
+        {
+            Debug.Log("[SteamNetworkManager] Lobby UI already disabled");
+            return;
+        }
+
+        Debug.Log("[SteamNetworkManager] Disabling lobby UI...");
+
+        var lobby = FindFirstObjectByType<LobbyUI>();
+        if (lobby == null)
+        {
+            Debug.LogWarning("[SteamNetworkManager] Could not find LobbyUI!");
+            return;
+        }
+
+        // Disable lobby camera
+        if (lobby.lobbyCamera != null)
+        {
+            lobby.lobbyCamera.enabled = false;
+            lobby.lobbyCamera.gameObject.SetActive(false);
+            Debug.Log("[SteamNetworkManager] Lobby camera disabled");
+        }
+        else
+        {
+            Debug.LogWarning("[SteamNetworkManager] LobbyUI.lobbyCamera is null!");
+        }
+
+        // Disable lobby UI canvas
+        lobby.gameObject.SetActive(false);
+        lobbyUIDisabled = true;
+
+        Debug.Log("[SteamNetworkManager] Lobby UI disabled successfully");
     }
 
     private void SpawnPlayerForConnection(NetworkConnectionToClient conn)
     {
-        // Remove existing player object if any
-        if (conn.identity != null)
+        if (xrNetworkPlayerPrefab == null)
         {
-            NetworkServer.Destroy(conn.identity.gameObject);
-        }
-
-        // Base spawn position
-        Vector3 basePos = new Vector3(336f, 0.25f, -606f);
-
-        int playerIndex = NetworkServer.connections.Count; 
-        float radius = 1.5f; 
-        float angle = (playerIndex - 1) * 45f; 
-        float rad = angle * Mathf.Deg2Rad;
-
-        Vector3 offset = new Vector3(Mathf.Cos(rad) * radius, 0f, Mathf.Sin(rad) * radius);
-        Vector3 spawnPos = basePos + offset;
-        Quaternion spawnRot = Quaternion.identity;
-
-        // Instantiate player
-        GameObject playerObj = Instantiate(xrNetworkPlayerPrefab, spawnPos, spawnRot);
-        NetworkServer.AddPlayerForConnection(conn, playerObj);
-
-        Debug.Log($"[SteamNetworkManager] Spawned XRNetworkPlayer at {spawnPos} for connection {conn.connectionId}");
-    }
-
-    private void DebugSteamStatus()
-    {
-        if (!SteamInitializer.Initialized)
-        {
-            Debug.LogError("[SteamNetworkManager] Steam not initialized!");
+            Debug.LogError("[SteamNetworkManager] xrNetworkPlayerPrefab is NULL! Cannot spawn player!");
             return;
         }
 
-        Debug.Log($"[SteamNetworkManager] === STEAM STATUS ===");
-        Debug.Log($"[SteamNetworkManager] Steam ID: {SteamUser.GetSteamID()}");
-        Debug.Log($"[SteamNetworkManager] Persona: {SteamFriends.GetPersonaName()}");
-        Debug.Log($"[SteamNetworkManager] Logged On: {SteamUser.BLoggedOn()}");
-        Debug.Log($"[SteamNetworkManager] App ID: {SteamUtils.GetAppID()}");
-
-        if (currentLobbyID.IsValid())
+        if (conn.identity != null)
         {
-            Debug.Log($"[SteamNetworkManager] Current Lobby: {currentLobbyID}");
-            Debug.Log($"[SteamNetworkManager] Lobby Member Count: {SteamMatchmaking.GetNumLobbyMembers(currentLobbyID)}");
-            CSteamID hostID = SteamMatchmaking.GetLobbyOwner(currentLobbyID);
-            Debug.Log($"[SteamNetworkManager] Lobby Owner: {hostID}");
-            string lobbyName = SteamMatchmaking.GetLobbyData(currentLobbyID, "name");
-            Debug.Log($"[SteamNetworkManager] Lobby Name: '{lobbyName}'");
+            Debug.LogWarning($"[SteamNetworkManager] Connection {conn.connectionId} already has a player, skipping spawn");
+            return;
         }
-        else
-        {
-            Debug.Log("[SteamNetworkManager] Not in a lobby");
-        }
-        Debug.Log($"[SteamNetworkManager] === END STATUS ===");
-    }
 
-    private void OnDisable()
-    {
-        SteamInitializer.OnSteamInitialized -= HookCallbacks;
+        // Calculate spawn position
+        int index = connectionSpawnIndex.TryGetValue(conn.connectionId, out int i) ? i : nextSpawnIndex++;
+        float angleRad = (index * 45f) * Mathf.Deg2Rad;
+        Vector3 offset = new Vector3(Mathf.Cos(angleRad) * spawnRadius, 0f, Mathf.Sin(angleRad) * spawnRadius);
+        Vector3 spawnPos = spawnCenter + offset;
+
+        Debug.Log($"[SteamNetworkManager] Spawning player at {spawnPos} (index {index}) for connection {conn.connectionId}");
+
+        GameObject playerObj = Instantiate(xrNetworkPlayerPrefab, spawnPos, Quaternion.identity);
+
+        if (playerObj == null)
+        {
+            Debug.LogError("[SteamNetworkManager] Failed to instantiate player prefab!");
+            return;
+        }
+
+        NetworkServer.AddPlayerForConnection(conn, playerObj);
+        Debug.Log($"[SteamNetworkManager] Player spawned successfully for connection {conn.connectionId}");
     }
+}
+
+public struct StatusUpdateMessage : NetworkMessage
+{
+    public string status;
 }

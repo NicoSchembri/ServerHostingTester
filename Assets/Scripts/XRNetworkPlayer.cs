@@ -3,65 +3,127 @@ using Mirror;
 
 public class XRNetworkPlayer : NetworkBehaviour
 {
-    [Header("VR Components")]
-    public Transform body;      // Capsule representing the body
-    public Transform head;      // Cube representing the head
-    public Transform leftHand;  
-    public Transform rightHand; 
+    [Header("VR Components (Local Rig)")]
+    public Transform body;
+    public Transform head;
+    public Transform leftHand;
+    public Transform rightHand;
 
-    [Header("Networked Dummies (for remote players)")]
+    [Header("Networked Dummies (Remote Representation)")]
     public Transform netBody;
     public Transform netHead;
     public Transform netLeftHand;
     public Transform netRightHand;
 
     [Header("VR Settings")]
-    public float updateRate = 0.05f; // How often to send updates to server
+    public float updateRate = 0.05f;
     private float nextUpdateTime = 0f;
+
+    private Vector3 tBodyPos, tHeadPos, tLeftPos, tRightPos;
+    private Quaternion tBodyRot, tHeadRot, tLeftRot, tRightRot;
+
+    [Tooltip("How fast remote avatars reach the latest received transforms")]
+    public float remoteLerpSpeed = 12f;
+
+    public Camera playerCamera;
+
+    public override void OnStartLocalPlayer()
+    {
+        base.OnStartLocalPlayer();
+        Debug.Log("[XRNetworkPlayer] OnStartLocalPlayer");
+
+        EnableGameplayCamera();
+
+        if (netBody) netBody.gameObject.SetActive(false);
+        if (netHead) netHead.gameObject.SetActive(false);
+        if (netLeftHand) netLeftHand.gameObject.SetActive(false);
+        if (netRightHand) netRightHand.gameObject.SetActive(false);
+
+        CmdNotifyServerPlayerSpawned();
+    }
 
     void Start()
     {
-        if (isLocalPlayer)
+        if (!isLocalPlayer)
         {
-            // Hide networked dummy objects for local player
-            if (netBody) netBody.gameObject.SetActive(false);
-            if (netHead) netHead.gameObject.SetActive(false);
-            if (netLeftHand) netLeftHand.gameObject.SetActive(false);
-            if (netRightHand) netRightHand.gameObject.SetActive(false);
-
-            // Enable VR camera (assumes it's child of head)
-            Camera xrCam = GetComponentInChildren<Camera>();
-            if (xrCam)
-            {
-                xrCam.enabled = true;
-                xrCam.gameObject.SetActive(true);
-            }
-        }
-        else
-        {
-            // Hide local transforms for remote players
             if (body) body.gameObject.SetActive(false);
             if (head) head.gameObject.SetActive(false);
             if (leftHand) leftHand.gameObject.SetActive(false);
             if (rightHand) rightHand.gameObject.SetActive(false);
+
+            if (netBody) { tBodyPos = netBody.position; tBodyRot = netBody.rotation; }
+            if (netHead) { tHeadPos = netHead.position; tHeadRot = netHead.rotation; }
+            if (netLeftHand) { tLeftPos = netLeftHand.position; tLeftRot = netLeftHand.rotation; }
+            if (netRightHand) { tRightPos = netRightHand.position; tRightRot = netRightHand.rotation; }
+        }
+        else
+        {
+            EnableGameplayCamera();
         }
     }
 
     void Update()
     {
-        if (!isLocalPlayer) return;
+        if (!isLocalPlayer)
+        {
+            float dt = Time.deltaTime * remoteLerpSpeed;
+
+            if (netBody) netBody.SetPositionAndRotation(
+                Vector3.Lerp(netBody.position, tBodyPos, dt),
+                Quaternion.Slerp(netBody.rotation, tBodyRot, dt)
+            );
+
+            if (netHead) netHead.SetPositionAndRotation(
+                Vector3.Lerp(netHead.position, tHeadPos, dt),
+                Quaternion.Slerp(netHead.rotation, tHeadRot, dt)
+            );
+
+            if (netLeftHand) netLeftHand.SetPositionAndRotation(
+                Vector3.Lerp(netLeftHand.position, tLeftPos, dt),
+                Quaternion.Slerp(netLeftHand.rotation, tLeftRot, dt)
+            );
+
+            if (netRightHand) netRightHand.SetPositionAndRotation(
+                Vector3.Lerp(netRightHand.position, tRightPos, dt),
+                Quaternion.Slerp(netRightHand.rotation, tRightRot, dt)
+            );
+
+            return;
+        }
 
         if (Time.time >= nextUpdateTime)
         {
-            nextUpdateTime = Time.time + updateRate;
+            nextUpdateTime = Time.time + Mathf.Max(0.01f, updateRate);
 
-            // Send VR rig position and rotations to server
+            if (body == null || head == null || leftHand == null || rightHand == null)
+                return;
+
             CmdSendTransforms(
                 body.position, body.rotation,
                 head.position, head.rotation,
                 leftHand.position, leftHand.rotation,
                 rightHand.position, rightHand.rotation
             );
+        }
+    }
+
+    public void EnableGameplayCamera()
+    {
+        if (!isLocalPlayer)
+            return;
+
+        if (playerCamera == null)
+            playerCamera = GetComponentInChildren<Camera>(true);
+
+        if (playerCamera != null)
+        {
+            playerCamera.gameObject.SetActive(true);
+            playerCamera.enabled = true;
+            Debug.Log("[XRNetworkPlayer] Gameplay camera enabled for local player");
+        }
+        else
+        {
+            Debug.LogWarning("[XRNetworkPlayer] No playerCamera found to enable");
         }
     }
 
@@ -84,9 +146,24 @@ public class XRNetworkPlayer : NetworkBehaviour
         Vector3 rightPos, Quaternion rightRot
     )
     {
-        if (netBody) netBody.SetPositionAndRotation(bodyPos, bodyRot);
-        if (netHead) netHead.SetPositionAndRotation(headPos, headRot);
-        if (netLeftHand) netLeftHand.SetPositionAndRotation(leftPos, leftRot);
-        if (netRightHand) netRightHand.SetPositionAndRotation(rightPos, rightRot);
-    } 
+        if (netBody) { tBodyPos = bodyPos; tBodyRot = bodyRot; }
+        if (netHead) { tHeadPos = headPos; tHeadRot = headRot; }
+        if (netLeftHand) { tLeftPos = leftPos; tLeftRot = leftRot; }
+        if (netRightHand) { tRightPos = rightPos; tRightRot = rightRot; }
+    }
+
+    [Command]
+    void CmdNotifyServerPlayerSpawned()
+    {
+        var manager = FindFirstObjectByType<SteamNetworkManager>();
+        if (manager != null)
+        {
+            manager.NotifyPlayerSpawned();
+            Debug.Log("[XRNetworkPlayer] CmdNotifyServerPlayerSpawned invoked");
+        }
+        else
+        {
+            Debug.LogWarning("[XRNetworkPlayer] CmdNotifyServerPlayerSpawned: SteamNetworkManager not found on server");
+        }
+    }
 }

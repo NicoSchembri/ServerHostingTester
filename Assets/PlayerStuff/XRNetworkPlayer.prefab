@@ -110,6 +110,8 @@ MonoBehaviour:
   netLeftHand: {fileID: 4505097227192761388}
   netRightHand: {fileID: 4249878565716408627}
   updateRate: 0.05
+  remoteLerpSpeed: 12
+  playerCamera: {fileID: 0}
 --- !u!1 &3272357842898270034
 GameObject:
   m_ObjectHideFlags: 0

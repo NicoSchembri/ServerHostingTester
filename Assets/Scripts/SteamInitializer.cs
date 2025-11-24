@@ -75,7 +75,6 @@ public class SteamInitializer : MonoBehaviour
 
     private IEnumerator ShutdownSteamDelayed()
     {
-        // Wait one frame so Mirror/FizzySteamworks can clean up first
         yield return null;
 
         if (Initialized)
