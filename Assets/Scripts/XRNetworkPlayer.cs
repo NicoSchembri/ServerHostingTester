@@ -158,12 +158,31 @@ public class XRNetworkPlayer : NetworkBehaviour
         var manager = FindFirstObjectByType<SteamNetworkManager>();
         if (manager != null)
         {
-            manager.NotifyPlayerSpawned();
+            // No longer needed to call NotifyPlayerSpawned
             Debug.Log("[XRNetworkPlayer] CmdNotifyServerPlayerSpawned invoked");
         }
         else
         {
             Debug.LogWarning("[XRNetworkPlayer] CmdNotifyServerPlayerSpawned: SteamNetworkManager not found on server");
         }
+    }
+
+    [TargetRpc]
+    public void TargetActivateCamera(NetworkConnection target)
+    {
+        // Hide lobby UI and camera
+        var lobby = FindFirstObjectByType<LobbyUI>();
+        if (lobby != null)
+        {
+            if (lobby.lobbyCamera != null)
+            {
+                lobby.lobbyCamera.enabled = false;
+                lobby.lobbyCamera.gameObject.SetActive(false);
+            }
+            lobby.gameObject.SetActive(false);
+        }
+
+        // Enable local VR camera
+        EnableGameplayCamera();
     }
 }

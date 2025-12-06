@@ -24,7 +24,7 @@ public class SteamInitializer : MonoBehaviour
 
     private IEnumerator InitSteam()
     {
-        yield return null; 
+        yield return null;
 
         try
         {

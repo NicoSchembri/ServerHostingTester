@@ -69,12 +69,6 @@ public class SteamNetworkManager : NetworkManager
     {
         Debug.Log($"[SteamNetworkManager] Received status update: {msg.status}");
         lobbyUI?.UpdateStatus(msg.status);
-
-        if (msg.status == "Game starting...")
-        {
-            Debug.Log("[SteamNetworkManager] Client received game start signal");
-            // Don't disable UI here - let the local player spawn handle it
-        }
     }
 
     public void HostLobby()
@@ -227,6 +221,19 @@ public class SteamNetworkManager : NetworkManager
         // Notify all clients that game is starting
         SendStatusToAllClients("Game starting...");
 
+        // Tell all clients to be on player camera
+        foreach (NetworkConnectionToClient conn in NetworkServer.connections.Values)
+        {
+            if (conn.identity != null)
+            {
+                XRNetworkPlayer player = conn.identity.GetComponent<XRNetworkPlayer>();
+                if (player != null)
+                {
+                    player.TargetActivateCamera(conn);
+                }
+            }
+        }
+
         StartCoroutine(SpawnAllPlayersDelayed());
     }
 
@@ -234,7 +241,6 @@ public class SteamNetworkManager : NetworkManager
     {
         yield return new WaitForSeconds(0.1f);
 
-        // Spawn all players
         int spawnedCount = 0;
         foreach (NetworkConnectionToClient conn in NetworkServer.connections.Values)
         {
@@ -256,50 +262,6 @@ public class SteamNetworkManager : NetworkManager
         }
     }
 
-    public void NotifyPlayerSpawned()
-    {
-        if (lobbyUIDisabled) return;
-
-        Debug.Log("[SteamNetworkManager] Player spawned notification received");
-        DisableLobbyUI();
-    }
-
-    private void DisableLobbyUI()
-    {
-        if (lobbyUIDisabled)
-        {
-            Debug.Log("[SteamNetworkManager] Lobby UI already disabled");
-            return;
-        }
-
-        Debug.Log("[SteamNetworkManager] Disabling lobby UI...");
-
-        var lobby = FindFirstObjectByType<LobbyUI>();
-        if (lobby == null)
-        {
-            Debug.LogWarning("[SteamNetworkManager] Could not find LobbyUI!");
-            return;
-        }
-
-        // Disable lobby camera
-        if (lobby.lobbyCamera != null)
-        {
-            lobby.lobbyCamera.enabled = false;
-            lobby.lobbyCamera.gameObject.SetActive(false);
-            Debug.Log("[SteamNetworkManager] Lobby camera disabled");
-        }
-        else
-        {
-            Debug.LogWarning("[SteamNetworkManager] LobbyUI.lobbyCamera is null!");
-        }
-
-        // Disable lobby UI canvas
-        lobby.gameObject.SetActive(false);
-        lobbyUIDisabled = true;
-
-        Debug.Log("[SteamNetworkManager] Lobby UI disabled successfully");
-    }
-
     private void SpawnPlayerForConnection(NetworkConnectionToClient conn)
     {
         if (xrNetworkPlayerPrefab == null)
@@ -314,7 +276,6 @@ public class SteamNetworkManager : NetworkManager
             return;
         }
 
-        // Calculate spawn position
         int index = connectionSpawnIndex.TryGetValue(conn.connectionId, out int i) ? i : nextSpawnIndex++;
         float angleRad = (index * 45f) * Mathf.Deg2Rad;
         Vector3 offset = new Vector3(Mathf.Cos(angleRad) * spawnRadius, 0f, Mathf.Sin(angleRad) * spawnRadius);
@@ -323,7 +284,6 @@ public class SteamNetworkManager : NetworkManager
         Debug.Log($"[SteamNetworkManager] Spawning player at {spawnPos} (index {index}) for connection {conn.connectionId}");
 
         GameObject playerObj = Instantiate(xrNetworkPlayerPrefab, spawnPos, Quaternion.identity);
-
         if (playerObj == null)
         {
             Debug.LogError("[SteamNetworkManager] Failed to instantiate player prefab!");
